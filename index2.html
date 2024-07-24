@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGL 2D Drawing</title>
+    <script type="text/javascript" src="https://unpkg.com/default-passive-events"></script>
+    <style>
+        canvas {
+            border: 1px solid black;
+        }
+        label, select, input {
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <label for="lineWidth">Line Width:</label>
+        <input type="range" id="lineWidth" name="lineWidth" min="1" max="10" value="2">
+        <label for="lineType">Line Type:</label>
+        <select id="lineType">
+            <option value="solid">Solid</option>
+            <option value="dotted">Dotted</option>
+            <option value="dashed">Dashed</option>
+        </select>
+    </div>
+    <canvas id="glCanvas" width="800" height="600"></canvas>
+    <!-- Shader -->
+    <script id="vertex-shader" type="x-shader/x-vertex">
+        attribute vec4 a_position;
+        uniform vec2 u_resolution;
+        void main() {
+            vec2 zeroToOne = a_position.xy / u_resolution;
+            vec2 zeroToTwo = zeroToOne * 2.0;
+            vec2 clipSpace = zeroToTwo - 1.0;
+            gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+        }
+    </script>
+    <script id="fragment-shader" type="x-shader/x-fragment">
+        precision mediump float;
+        uniform vec4 u_color;
+        void main() {
+            gl_FragColor = u_color;
+        }
+    </script>
+    <script>
+        const canvas = document.getElementById('glCanvas');
+        const gl = canvas.getContext('webgl');
+        if (!gl) {
+            console.log('WebGL not supported, falling back on experimental-webgl');
+            gl = canvas.getContext('experimental-webgl');
+        }
+        if (!gl) {
+            alert('Your browser does not support WebGL');
+        }
+        const vertexShaderSource = document.getElementById('vertex-shader').text;
+        const fragmentShaderSource = document.getElementById('fragment-shader').text;
+        const vertexShader = gl.createShader(gl.VERTEX_SHADER);
+        gl.shaderSource(vertexShader, vertexShaderSource);
+        gl.compileShader(vertexShader);
+        const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+        gl.shaderSource(fragmentShader, fragmentShaderSource);
+        gl.compileShader(fragmentShader);
+        const shaderProgram = gl.createProgram();
+        gl.attachShader(shaderProgram, vertexShader);
+        gl.attachShader(shaderProgram, fragmentShader);
+        gl.linkProgram(shaderProgram);
+        gl.useProgram(shaderProgram);
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        const resolutionUniformLocation = gl.getUniformLocation(shaderProgram, 'u_resolution');
+        const colorUniformLocation = gl.getUniformLocation(shaderProgram, 'u_color');
+        const lineWidthRange = document.getElementById('lineWidth');
+        const lineTypeSelect = document.getElementById('lineType');
+        let lines = [];
+        let startPos = null;
+        let isDrawing = false;
+        let currentSnapPoint = null;
+        let draggingPoint = null;
+        function drawSolidLine(x1, y1, x2, y2, lineWidth) {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx = -dy / len;
+            const ny = dx / len;
+            const halfWidth = lineWidth / 2;
+            const positions = new Float32Array([
+                x1 + nx * halfWidth, y1 + ny * halfWidth,
+                x1 - nx * halfWidth, y1 - ny * halfWidth, x2 + nx * halfWidth, y2 + ny * halfWidth,
+                x2 - nx * halfWidth, y2 - ny * halfWidth,
+            ]);
+            gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+            const positionLocation = gl.getAttribLocation(shaderProgram, 'a_position');
+            gl.enableVertexAttribArray(positionLocation);
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        }
+        function createDottedLine(x1, y1, x2, y2, segmentLength = 5, gapLength = 5) {
+            const positions = [];
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx = dx / len;
+            const ny = dy / len;
+            for (let d = 0; d < len; d += segmentLength + gapLength) {
+                const t1 = d / len;
+                const t2 = Math.min(d + segmentLength, len) / len;
+                const xi1 = x1 + t1 * dx;
+                const yi1 = y1 + t1 * dy;
+                const xi2 = x1 + t2 * dx;
+                const yi2 = y1 + t2 * dy;
+                positions.push(xi1, yi1, xi2, yi2);
+            }
+            return new Float32Array(positions);
+        }
+        function createDashedLine(x1, y1, x2, y2, segmentLength = 10, gapLength = 5) {
+            const positions = [];
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            const nx = dx / len;
+            const ny = dy / len;
+            for (let d = 0; d < len; d += segmentLength + gapLength) {
+                const t1 = d / len;
+                const t2 = Math.min(d + segmentLength, len) / len;
+                const xi1 = x1 + t1 * dx;
+                const yi1 = y1 + t1 * dy;
+                const xi2 = x1 + t2 * dx;
+                const yi2 = y1 + t2 * dy;
+                positions.push(xi1, yi1, xi2, yi2);
+            }
+            return new Float32Array(positions);
+        }
+        function drawLine(x1, y1, x2, y2, lineWidth, lineType) {
+            switch (lineType) {
+                case 'solid':
+                    drawSolidLine(x1, y1, x2, y2, lineWidth);
+                    break;
+                case 'dotted':
+                    const dottedLinePositions = createDottedLine(x1, y1, x2, y2, 1, 2.5);
+                    gl.bufferData(gl.ARRAY_BUFFER, dottedLinePositions, gl.STATIC_DRAW);
+                    const positionLocationDotted = gl.getAttribLocation(shaderProgram, 'a_position');
+                    gl.enableVertexAttribArray(positionLocationDotted);
+                    gl.vertexAttribPointer(positionLocationDotted, 2, gl.FLOAT, false, 0, 0);
+                    gl.drawArrays(gl.LINES, 0, dottedLinePositions.length / 2);
+                    break;
+                case 'dashed':
+                    const dashedLinePositions = createDashedLine(x1, y1, x2, y2, 5, 5);
+                    gl.bufferData(gl.ARRAY_BUFFER, dashedLinePositions, gl.STATIC_DRAW);
+                    const positionLocationDashed = gl.getAttribLocation(shaderProgram, 'a_position');
+                    gl.enableVertexAttribArray(positionLocationDashed);
+                    gl.vertexAttribPointer(positionLocationDashed, 2, gl.FLOAT, false, 0, 0);
+                    gl.drawArrays(gl.LINES, 0, dashedLinePositions.length / 2);
+                    break;
+            }
+        }
+        function drawFilledCircle(x, y, radius, segments) {
+            const circleVertices = [];
+            for (let i = 0; i <= segments; i++) {
+                const angle = (i / segments) * 2 * Math.PI;
+                circleVertices.push(x + radius * Math.cos(angle), y + radius * Math.sin(angle));
+            }
+            const positions = new Float32Array(circleVertices);
+            gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
+            const positionLocation = gl.getAttribLocation(shaderProgram, 'a_position');
+            gl.enableVertexAttribArray(positionLocation);
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+            gl.drawArrays(gl.TRIANGLE_FAN, 0, segments + 1);
+        }
+        function getDistance(x1, y1, x2, y2) {
+            return Math.sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
+        }
+        function findClosestPoint(x, y) {
+            let closestPoint = null;
+            let minDist = Infinity;
+            lines.forEach(line => {
+                const startDistance = getDistance(x, y, line.x1, line.y1);
+                const endDistance = getDistance(x, y, line.x2, line.y2);
+                if (startDistance < minDist && startDistance < 10 / canvas.width) {  // 10 pixels chuyển sang không gian tọa độ
+                    minDist = startDistance;
+                    closestPoint = { line, pos: 'start' };
+                }
+                if (endDistance < minDist && endDistance < 10 / canvas.width) {
+                    minDist = endDistance;
+                    closestPoint = { line, pos: 'end' };
+                }
+            });
+            return closestPoint;
+        }
+        function render() {
+            gl.clear(gl.COLOR_BUFFER_BIT);
+            gl.uniform2f(resolutionUniformLocation, gl.canvas.width, gl.canvas.height);
+            const lineWidth = parseInt(lineWidthRange.value);
+            const lineType = lineTypeSelect.value;
+            // Vẽ các đường thẳng
+            lines.forEach(line => {
+                gl.uniform4f(colorUniformLocation, 1, 0, 0, 1);  // Màu đỏ cho đường thẳng
+                drawLine(line.x1 * gl.canvas.width, line.y1 * gl.canvas.height, line.x2 * gl.canvas.width, line.y2 * gl.canvas.height, line.lineWidth, line.lineType);
+                // Vẽ các điểm đầu và cuối của đường thẳng
+                const x1 = line.x1;
+                const y1 = line.y1;
+                const x2 = line.x2;
+                const y2 = line.y2;
+                if (currentSnapPoint && (currentSnapPoint.x === line.x1 && currentSnapPoint.y === line.y1)) {
+                    gl.uniform4f(colorUniformLocation, 1, 0, 0, 1);  // Màu đỏ cho điểm đang "snap"
+                    drawFilledCircle(x1, y1, 3, 32);  // Vòng tròn lớn hơn
+                } else {
+                    gl.uniform4f(colorUniformLocation, 0, 0, 1, 1);  // Màu xanh cho điểm
+                    drawFilledCircle(x1, y1, 2, 32);
+                }
+                if (currentSnapPoint && (currentSnapPoint.x === line.x2 && currentSnapPoint.y === line.y2)) {
+                    gl.uniform4f(colorUniformLocation, 1, 0, 0, 1);  // Màu đỏ cho điểm đang "snap"
+                    drawFilledCircle(x2, y2, 3, 32);  // Vòng tròn lớn hơn
+                } else {
+                    gl.uniform4f(colorUniformLocation, 0, 0, 1, 1);  // Màu xanh cho điểm
+                    drawFilledCircle(x2, y2, 2, 32);
+                }
+                // Vẽ trung điểm của đoạn thẳng
+                const midX = (line.x1 + line.x2) / 2;
+                const midY = (line.y1 + line.y2) / 2;
+                if (currentSnapPoint && (currentSnapPoint.x === midX && currentSnapPoint.y === midY)) {
+                    gl.uniform4f(colorUniformLocation, 1, 0, 0, 1);  // Màu đỏ cho trung điểm đang "snap"
+                    drawFilledCircle(midX, midY, 3, 32);  // Vòng tròn lớn hơn
+                } else {
+                    gl.uniform4f(colorUniformLocation, 0, 0, 1, 1);  // Màu xanh cho trung điểm
+                    drawFilledCircle(midX, midY, 2, 32);
+                }
+            });
+            // Tạm thời vẽ đường từ điểm bắt đầu đến vị trí con trỏ
+            if (isDrawing && startPos) {
+                if (currentSnapPoint) {
+                    gl.uniform4f(colorUniformLocation, 0, 0, 0, 1);  // Màu đen cho đường tạm
+                    drawLine(startPos.x * gl.canvas.width, startPos.y * gl.canvas.height, currentSnapPoint.x * gl.canvas.width, currentSnapPoint.y * gl.canvas.height, lineWidth, lineTypeSelect.value);
+                } else {
+                    gl.uniform4f(colorUniformLocation, 0, 0, 0, 1);  // Màu đen cho đường tạm
+                    drawLine(startPos.x * gl.canvas.width, startPos.y * gl.canvas.height, currentMousePos.x * gl.canvas.width, currentMousePos.y * gl.canvas.height, lineWidth, lineTypeSelect.value);
+                }
+                // Vòng tròn xanh tại điểm đầu của đường tạm
+                gl.uniform4f(colorUniformLocation, 0, 0, 1, 1);
+                drawFilledCircle(startPos.x * gl.canvas.width, startPos.y * gl.canvas.height, 2, 32);
+            }
+        }
+        let currentMousePos = { x: 0, y: 0 };
+        canvas.addEventListener('click', function(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = (event.clientX - rect.left) / rect.width;
+            const y = (event.clientY - rect.top) / rect.height;
+            if (currentSnapPoint) {
+                if (!isDrawing) {
+                    startPos = { x: currentSnapPoint.x, y: currentSnapPoint.y };
+                    isDrawing = true;
+                } else {
+                    lines.push({
+                        x1: startPos.x,
+                        y1: startPos.y,
+                        x2: currentSnapPoint.x,
+                        y2: currentSnapPoint.y,
+                        lineWidth: parseInt(lineWidthRange.value),
+                        lineType: lineTypeSelect.value
+                    });
+                    // Đặt lại startPos thành điểm cuối của đường thẳng vừa vẽ
+                    startPos = { x: currentSnapPoint.x, y: currentSnapPoint.y };
+                }
+                currentSnapPoint = null;
+            } else {
+                if (!isDrawing) {
+                    startPos = { x: x, y: y };
+                    isDrawing = true;
+                } else {
+                    lines.push({
+                        x1: startPos.x,
+                        y1: startPos.y,
+                        x2: x,
+                        y2: y,
+                        lineWidth: parseInt(lineWidthRange.value),
+                        lineType: lineTypeSelect.value
+                    });
+                    // Đặt lại startPos thành điểm cuối của đường thẳng vừa vẽ
+                    startPos = { x: x, y: y };
+                }
+            }
+            render();
+        });
+        canvas.addEventListener('dblclick', function(event) {
+            // Đặt lại trạng thái, bắt buộc người dùng phải chọn lại điểm bắt đầu mới
+            isDrawing = false;
+            startPos = null;
+            currentSnapPoint = null;
+            render();
+        });
+        canvas.addEventListener('mousedown', function(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = (event.clientX - rect.left) / rect.width;
+            const y = (event.clientY - rect.top) / rect.height;
+            draggingPoint = findClosestPoint(x, y);
+        });
+        canvas.addEventListener('touchstart', function(event) {
+            //event.preventDefault();
+            if (event.touches.length === 2) {
+                // Đặt lại trạng thái khi chạm hai ngón tay cùng lúc
+                isDrawing = false;
+                startPos = null;
+                currentSnapPoint = null;
+                render();
+            } else {
+                const rect = canvas.getBoundingClientRect();
+                const x = (event.clientX - rect.left) / rect.width;
+                const y = (event.clientY - rect.top) / rect.height;
+                draggingPoint = findClosestPoint(x, y);
+                render();
+            }
+        });
+
+        canvas.addEventListener('touchmove', function(event) {
+            const rect = canvas.getBoundingClientRect();
+            const touch = event.touches[0];
+            currentMousePos.x = (touch.clientX - rect.left) / rect.width;
+            currentMousePos.y = (touch.clientY - rect.top) / rect.height;
+
+            // Kiểm tra khoảng cách với các điểm đầu, cuối và trung điểm của các đường thẳng
+            currentSnapPoint = null;
+            lines.forEach(line => {
+                const startDistance = getDistance(currentMousePos.x, currentMousePos.y, line.x1, line.y1);
+                const endDistance = getDistance(currentMousePos.x, currentMousePos.y, line.x2, line.y2);
+                const midX = (line.x1 + line.x2) / 2;
+                const midY = (line.y1 + line.y2) / 2;
+                const midDistance = getDistance(currentMousePos.x, currentMousePos.y, midX, midY);
+                if (startDistance < 10 / gl.canvas.width) {  // 10 pixels chuyển sang không gian WebGL
+                    currentSnapPoint = { x: line.x1, y: line.y1 };
+                } else if (endDistance < 10 / gl.canvas.width) {
+                    currentSnapPoint = { x: line.x2, y: line.y2 };
+                } else if (midDistance < 10 / gl.canvas.width) {
+                    currentSnapPoint = { x: midX, y: midY };
+                }
+            });
+            render();
+        });
+        
+
+        
+        canvas.addEventListener('touchend', function(event) {
+            if (!isDrawing) {
+                draggingPoint = null;
+            }
+        });
+
+        canvas.addEventListener('mouseup', function(event) {
+            draggingPoint = null;
+        });
+        canvas.addEventListener('mousemove', function(event) {
+            const rect = canvas.getBoundingClientRect();
+            currentMousePos.x = (event.clientX - rect.left) / rect.width;
+            currentMousePos.y = (event.clientY - rect.top) / rect.height;
+            // Di chuyển điểm nếu đang kéo
+            if (draggingPoint) {
+                if (draggingPoint.pos === 'start') {
+                    draggingPoint.line.x1 = currentMousePos.x;
+                    draggingPoint.line.y1 = currentMousePos.y;
+                } else if (draggingPoint.pos === 'end') {
+                    draggingPoint.line.x2 = currentMousePos.x;
+                    draggingPoint.line.y2 = currentMousePos.y;
+                }
+                render();
+                return;
+            }
+            // Kiểm tra khoảng cách với các điểm đầu, cuối và trung điểm của các đường thẳng
+            currentSnapPoint = null;
+            lines.forEach(line => {
+                const startDistance = getDistance(currentMousePos.x, currentMousePos.y, line.x1, line.y1);
+                const endDistance = getDistance(currentMousePos.x, currentMousePos.y, line.x2, line.y2);
+                const midX = (line.x1 + line.x2) / 2;
+                const midY = (line.y1 + line.y2) / 2;
+                const midDistance = getDistance(currentMousePos.x, currentMousePos.y, midX, midY);
+                if (startDistance < 10 / canvas.width) {  // 10 pixels chuyển sang không gian WebGL
+                    currentSnapPoint = { x: line.x1, y: line.y1 };
+                } else if (endDistance < 10 / canvas.width) {
+                    currentSnapPoint = { x: line.x2, y: line.y2 };
+                } else if (midDistance < 10 / canvas.width) {
+                    currentSnapPoint = { x: midX, y: midY };
+                }
+            });
+            render();
+        });
+        
+       
+        window.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                isDrawing = false;
+                startPos = null;
+                currentSnapPoint = null;
+                parabolaPoints = [];
+                render();
+            }
+            if (event.ctrlKey && (event.key === 'z' || event.key === 'Z')) {
+                if (lines.length > 0) {
+                    lines.pop();
+                    render();
+                }
+            }
+        });
+
+         // Tạo nút "Undo" cho giao diện
+         const undoButton = document.createElement('button');
+        undoButton.innerText = 'Undo';
+        undoButton.style.position = 'fixed';
+        undoButton.style.top = '33px';
+        undoButton.style.left = '10px';
+        document.body.appendChild(undoButton);
+        // Thêm sự kiện click cho nút "Undo"
+        undoButton.addEventListener('click', function() {
+            if (lines.length > 0) {
+                lines.pop();
+                render();
+            }
+        });
+        gl.clearColor(1.0, 1.0, 1.0, 1.0);
+        render();
+    </script>
+</body>
+</html>
