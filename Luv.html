@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Two.js + Hammer.js + dat.GUI Demo</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        #draw-canvas { display: block; width: 100vw; height: 100vh; }
+        .two-widget canvas { display: block; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.7/dat.gui.min.js"></script>
+</head>
+<body>
+    <div id="draw-canvas"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/two.js/0.7.9/two.min.js"></script>
+    <script src="https://hammerjs.github.io/dist/hammer.min.js"></script>
+    <script>
+        // Initialize Two.js with CanvasRenderer
+        const elem = document.getElementById('draw-canvas');
+        const params = {
+            fullscreen: true,
+            type: Two.Types.canvas // Specify CanvasRenderer
+        };
+        const two = new Two(params).appendTo(elem);
+        // Initialize Hammer.js
+        const hammer = new Hammer(elem);
+        // Debug logging
+        console.log('Two.js instance:', two);
+        console.log('Hammer.js instance:', hammer);
+        // Initialize dat.GUI
+        const gui = new dat.GUI();
+        const settings = {
+            lineWidth: 2,
+            lineColor: '#000000',
+            dashedLine: false,
+            snapRadius: 10
+        };
+        gui.add(settings, 'lineWidth', 1, 10).name('Line Width');
+        gui.addColor(settings, 'lineColor').name('Line Color');
+        gui.add(settings, 'dashedLine').name('Dashed Line');
+        gui.add(settings, 'snapRadius', 1, 50).name('Snap Radius');
+        // Track lines and temporary elements
+        const lines = [];
+        let startPoint = null;
+        let tempCircle = null;
+        let tempLine = null;
+        let closestCircle = null;
+        let isSnapped = false;
+        const createTempLine = (x, y) => {
+            if (!tempLine) {
+                tempLine = two.makeLine(startPoint.x, startPoint.y, x, y);
+                tempLine.stroke = '#0000FF';  // Blue temporary line
+                tempLine.linewidth = 2;
+                two.add(tempLine);
+            } else {
+                tempLine.vertices[1].set(x, y);
+            }
+        };
+        const updateTempCircleColor = (x, y) => {
+            const closestPoint = findClosestPointOnLine(x, y, lines, settings.snapRadius);
+            if (closestPoint) {
+                if (!closestCircle) {
+                    closestCircle = two.makeCircle(closestPoint.x, closestPoint.y, 5);
+                    closestCircle.fill = '#00FF00'; // Green circle for midpoint
+                    closestCircle.noStroke();
+                    two.add(closestCircle);
+                } else {
+                    closestCircle.translation.set(closestPoint.x, closestPoint.y);
+                }
+                closestCircle.fill = '#FF0000'; // Red when near
+                isSnapped = true;
+            } else {
+                if (closestCircle) {
+                    closestCircle.fill = '#00FF00'; // Green when far
+                    isSnapped = false;
+                }
+            }
+        };
+        // Handle canvas tap events
+        function handleStart(x, y) {
+            console.log(`Setting start point at (${x}, ${y})`);
+            startPoint = { x, y };
+            tempCircle = two.makeCircle(startPoint.x, startPoint.y, 5);
+            tempCircle.fill = '#FF0000';
+            tempCircle.noStroke();
+            two.add(tempCircle);
+            two.update();
+            console.log('Start point set.');
+        }
+        hammer.on('tap', function(event) {
+            const rect = elem.getBoundingClientRect();
+            const x = event.center.x - rect.left;
+            const y = event.center.y - rect.top;
+            // Only set start point if it has not been set before
+            if (!startPoint) {
+                handleStart(x, y);
+            }
+        });
+        // Handle pan events - for moving temporary line
+        hammer.on('pan', function(event) {
+            if (startPoint) {
+                const rect = elem.getBoundingClientRect();
+                const x = event.center.x - rect.left;
+                const y = event.center.y - rect.top;
+                let endPoint = { x: x, y: y };
+                updateTempCircleColor(endPoint.x, endPoint.y);
+                if (isSnapped && closestCircle) {
+                    endPoint = { x: closestCircle.translation.x, y: closestCircle.translation.y };
+                }
+                createTempLine(endPoint.x, endPoint.y);
+                two.update();
+            }
+        });
+        // Handle press events - for finalizing the line
+        hammer.on('press', function(event) {
+            if (startPoint) {
+                const rect = elem.getBoundingClientRect();
+                const x = event.center.x - rect.left;
+                const y = event.center.y - rect.top;
+                let endPoint = { x, y };
+                if (isSnapped && closestCircle) {
+                    endPoint = { x: closestCircle.translation.x, y: closestCircle.translation.y };
+                }
+                // Create and push the new line to lines array
+                const line = two.makeLine(startPoint.x, startPoint.y, endPoint.x, endPoint.y);
+                line.linewidth = settings.lineWidth;
+                line.stroke = settings.lineColor;  // Use current lineColor
+                line.dashes = settings.dashedLine ? [5, 5] : [];
+                lines.push(line);
+                two.add(line);
+                console.log('Line added from start point to end point.', line);
+                two.update();
+                console.log('Canvas updated after adding line.');
+                // Set the new start point to the previous end point
+                startPoint = endPoint;
+                // Update the temporary circle position
+                tempCircle.translation.set(startPoint.x, startPoint.y);
+                if (tempLine) {
+                    two.remove(tempLine);
+                    tempLine = null;
+                }
+                if (closestCircle) {
+                    two.remove(closestCircle);
+                    closestCircle = null;
+                    isSnapped = false;
+                }
+            }
+        });
+        // Example function to toggle between solid and dashed lines
+        function toggleLineMode() {
+            settings.dashedLine = !settings.dashedLine;
+            console.log(`Drawing mode toggled to ${settings.dashedLine ? 'Dashed' : 'Solid'}`);
+        }
+        // Listen for toggling using a key press (for example 'd' to toggle)
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'd') {
+                toggleLineMode();
+            }
+        });
+        // Utility function to get nearest point on line (Assumes lines to be simple with two endpoints)
+        function getNearestPointOnLine(x, y, line) {
+            const x1 = line.vertices[0].x;
+            const y1 = line.vertices[0].y;
+            const x2 = line.vertices[1].x;
+            const y2 = line.vertices[1].y;
+            const A = x - x1;
+            const B = y - y1;
+            const C = x2 - x1;
+            const D = y2 - y1;
+            const dot = A * C + B * D;
+            const len_sq = C * C + D * D;
+            const param = len_sq !== 0 ? dot / len_sq : -1;
+            let xx, yy;
+            if (param < 0) {
+                xx = x1;
+                yy = y1;
+            } else if (param > 1) {
+                xx = x2;
+                yy = y2;
+            } else {
+                xx = x1 + param * C;
+                yy = y1 + param * D;
+            }
+            return { x: xx, y: yy };
+        };
+        // Function to find the closest point on any line within a specified radius
+        function findClosestPointOnLine(x, y, lines, radius = 10) {
+            let closestPoint = null;
+            let minDist = radius;
+            for (let line of lines) {
+                const start = { x: line.vertices[0].x, y: line.vertices[0].y };
+                const end = { x: line.vertices[1].x, y: line.vertices[1].y };
+                const mid = {
+                    x: (start.x + end.x) / 2,
+                    y: (start.y + end.y) / 2
+                };
+                const startDist = Math.hypot(x - start.x, y - start.y);
+                const endDist = Math.hypot(x - end.x, y - end.y);
+                const midDist = Math.hypot(x - mid.x, y - mid.y);
+                if (startDist < minDist) {
+                    minDist = startDist;
+                    closestPoint = start;
+                }
+                if (endDist < minDist) {
+                    minDist = endDist;
+                    closestPoint = end;
+                }
+                if (midDist < minDist) {
+                    minDist = midDist;
+                    closestPoint = mid;
+                }
+            }
+            return closestPoint;
+        };
+    </script>
+</body>
+</html>
